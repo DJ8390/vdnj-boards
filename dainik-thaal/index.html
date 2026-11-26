@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Dainik Thaal Board</title>
+<script>
+/* =====================================================================
+   SETTINGS  —  the only part you may need to change
+   ===================================================================== */
+const SETTINGS = {
+  // The sheet link is NOT stored here (this code is public on GitHub).
+  // It comes from the board's address in OptiSigns: .../dainik-thaal/?s=<2PACX id>&gid=<tab id>
+  sheetCsvUrl: (function () {
+    var q = new URLSearchParams(location.search), id = q.get("s");
+    return id ? "https://docs.google.com/spreadsheets/d/e/" + encodeURIComponent(id) + "/pub?gid=" + encodeURIComponent(q.get("gid") || "0") + "&single=true&output=csv" : "";
+  })(),
+  title: "This Week's Donation & Thaal Seva List",
+  rowsPerPage: 22,
+  slotSeconds: 30,      // = the board's duration in the OptiSigns playlist; pages share it equally
+  preloadSeconds: 7,    // OptiSigns loads the next item 6-8 s before it is shown
+  refreshSeconds: 60,   // how often the sheet is re-read while the page stays open
+  cornerPhoto: ""       // e.g. "maharaj.jpg" (faded photo top-right); "" = none
+};
+</script>
+<style>
+  :root { --maroon: hsl(345 60% 22%); --gold: hsl(40 65% 50%); --gold70: hsl(40 65% 50% / .70); --gold60: hsl(40 65% 50% / .60);
+          --cream: hsl(42 60% 91%); --paper88: hsl(45 50% 97% / .88); }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 100vw; height: 100vh; overflow: hidden; background: var(--cream); }
+  #board { position: relative; isolation: isolate; width: 100vw; height: 100vh; overflow: hidden; background: var(--cream); color: var(--maroon);
+           font-family: Georgia, 'Times New Roman', serif; font-weight: 600; }
+  .corner { position: absolute; right: 1.2vw; top: -3vh; z-index: -1; width: 14vw;
+            -webkit-mask-image: radial-gradient(ellipse 62% 62% at 50% 50%, #000 40%, transparent 100%); mask-image: radial-gradient(ellipse 62% 62% at 50% 50%, #000 40%, transparent 100%); }
+  .corner img { display: block; width: 100%; height: auto; opacity: .5; }
+  .frame { position: absolute; top: 1.2vh; left: 1.2vh; right: 1.2vh; bottom: 1.2vh; border: 1px solid var(--gold60); pointer-events: none; }
+  .bar { position: absolute; left: 0; right: 0; bottom: 0; height: 1.2vh; background: var(--maroon); }
+  .pageno { position: absolute; bottom: 2.2vh; right: 3vw; z-index: 1; font-size: 1.8vh; }
+  .col { display: flex; flex-direction: column; height: 100%; padding: 1.6vh 7vw; }
+  header { display: flex; flex-direction: column; align-items: center; }
+  .hrow { display: flex; align-items: center; }
+  .hrow img { height: 9vh; width: auto; mix-blend-mode: multiply; margin-right: 1.5vw; }
+  h1 { font-size: 4.2vh; font-weight: 600; line-height: 1.25; }
+  .pill { display: flex; align-items: center; margin-top: 1vh; border-radius: 16px; border: .4vh solid var(--gold); background: var(--maroon); color: var(--cream); padding: .5vh 2.5vw; font-size: 3.4vh; }
+  .pill svg { width: 3.4vh; height: 3.4vh; margin-right: 1vw; }
+  .table { margin-top: 1.2vh; display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; border-radius: 12px; border: .3vh solid var(--maroon); background: var(--paper88); }
+  .thead { display: flex; background: var(--maroon); color: var(--cream); font-size: 3vh; }
+  .c1 { width: 8.333%; text-align: center; } .c2 { width: 52.778%; } .c3 { width: 38.889%; }
+  .thead div { padding: .6vh 0 .6vh 1.5vw; } .thead .c1 { padding: .5vh 0; }
+  .tbody { flex: 1; min-height: 0; display: flex; flex-direction: column; font-size: 2.1vh; }
+  .row { display: flex; align-items: stretch; border-bottom: 1px solid var(--gold70); line-height: 1; min-height: 0; }
+  .row.last { border-bottom: 0; }
+  .row div { display: flex; align-items: center; overflow: hidden; white-space: nowrap; }
+  .row .c1 { justify-content: center; font-variant-numeric: tabular-nums; }
+  .row .c2, .row .c3 { border-left: 1px solid var(--gold70); padding-left: 1.5vw; }
+  .footer { display: block; margin: .8vh auto 0; height: 17vh; width: auto; flex-shrink: 0; mix-blend-mode: multiply; }
+  .msg { position: absolute; left: 0; right: 0; bottom: 3vh; text-align: center; font-size: 1.6vh; opacity: .6; }
+</style>
+</head>
+<body>
+<div id="board"></div>
+<script>
+(function () {
+  var MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+  var state = { rows: [], subtitle: "", page: 0, timer: null, startedAt: Date.now() };
+
+  function esc(s) { return String(s == null ? "" : s).replace(/[&<>"]/g, function (c) { return { "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" }[c]; }); }
+
+  // --- CSV parsing (handles quotes, commas and line breaks inside quotes)
+  function parseCsv(text) {
+    var rows = [], row = [], cell = "", q = false;
+    for (var i = 0; i < text.length; i++) {
+      var ch = text[i];
+      if (q) {
+        if (ch === '"') { if (text[i + 1] === '"') { cell += '"'; i++; } else q = false; }
+        else cell += ch;
+      } else if (ch === '"') q = true;
+      else if (ch === ',') { row.push(cell); cell = ""; }
+      else if (ch === '\n' || ch === '\r') { if (ch === '\r' && text[i + 1] === '\n') i++; row.push(cell); rows.push(row); row = []; cell = ""; }
+      else cell += ch;
+    }
+    if (cell !== "" || row.length) { row.push(cell); rows.push(row); }
+    return rows;
+  }
+
+  // --- dates: day number (UTC days) from "11/5/2026", "2026-11-05", "Nov 5, 2026"
+  function toDay(v) {
+    v = String(v || "").trim(); if (!v) return null;
+    var m = v.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+    var d;
+    if (m) { var y = +m[3]; if (y < 100) y += 2000; d = Date.UTC(y, +m[1] - 1, +m[2]); }
+    else if ((m = v.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/))) d = Date.UTC(+m[1], +m[2] - 1, +m[3]);
+    else { var p = new Date(v); if (isNaN(p)) return null; d = Date.UTC(p.getFullYear(), p.getMonth(), p.getDate()); }
+    return Math.floor(d / 86400000);
+  }
+  function weekStart(day) { var dow = new Date(day * 86400000).getUTCDay(); return day - dow; } // Sunday
+  function label(ws) {
+    var a = new Date(ws * 86400000), b = new Date((ws + 6) * 86400000);
+    var am = MONTHS[a.getUTCMonth()], bm = MONTHS[b.getUTCMonth()];
+    return a.getUTCFullYear() === b.getUTCFullYear()
+      ? am + " " + a.getUTCDate() + " – " + bm + " " + b.getUTCDate() + ", " + b.getUTCFullYear()
+      : am + " " + a.getUTCDate() + ", " + a.getUTCFullYear() + " – " + bm + " " + b.getUTCDate() + ", " + b.getUTCFullYear();
+  }
+
+  function fromCsv(text) {
+    var v = parseCsv(text);
+    if (!v.length) return { rows: [], subtitle: "" };
+    var head = v[0].map(function (c) { return String(c).trim().toLowerCase(); });
+    var ni = head.indexOf("name"), fi = head.indexOf("for"), di = head.indexOf("date");
+    if (di < 0) di = head.indexOf("dates");
+    if (ni < 0) ni = 1; if (fi < 0) fi = 2;
+    var all = [], last = null;
+    v.slice(1).forEach(function (r) {
+      var name = String(r[ni] || "").trim(), purpose = String(r[fi] || "").trim();
+      if (!name && !purpose) return;
+      var day = null;
+      if (di >= 0) { day = toDay(r[di]); if (day === null) day = last; else last = day; }
+      all.push({ name: name, purpose: purpose, day: day });
+    });
+    var dated = all.filter(function (r) { return r.day !== null; });
+    if (di < 0 || !dated.length) return { rows: all, subtitle: "" };
+    var latest = weekStart(Math.max.apply(null, dated.map(function (r) { return r.day; })));
+    return { rows: dated.filter(function (r) { return weekStart(r.day) === latest; }), subtitle: label(latest) };
+  }
+
+  function pagesCount() { return Math.max(1, Math.ceil(state.rows.length / SETTINGS.rowsPerPage)); }
+
+  function render() {
+    var P = SETTINGS.rowsPerPage, pages = pagesCount(), p = Math.min(state.page, pages - 1), start = p * P;
+    var vis = state.rows.slice(start, start + P), rowH = (100 / P) + "%";
+    var html = "";
+    if (SETTINGS.cornerPhoto) html += '<div class="corner"><img src="' + esc(SETTINGS.cornerPhoto) + '" alt=""></div>';
+    html += '<div class="frame"></div><div class="bar"></div>';
+    if (pages > 1) html += '<div class="pageno">Page ' + (p + 1) + ' of ' + pages + '</div>';
+    html += '<div class="col"><header><div class="hrow"><img src="emblem.png" alt=""><h1>' + esc(SETTINGS.title) + '</h1></div>';
+    if (state.subtitle) html += '<div class="pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18M8 14h.01M12 14h.01M16 14h.01M8 18h.01M12 18h.01M16 18h.01"/></svg><span>' + esc(state.subtitle) + '</span></div>';
+    html += '</header><div class="table"><div class="thead"><div class="c1">#</div><div class="c2">Name</div><div class="c3">For</div></div><div class="tbody">';
+    vis.forEach(function (r, i) {
+      html += '<div class="row' + (i === P - 1 ? ' last' : '') + '" style="height:' + rowH + '"><div class="c1">' + (start + i + 1) + '</div><div class="c2">' + esc(r.name) + '</div><div class="c3">' + esc(r.purpose) + '</div></div>';
+    });
+    html += '</div></div><img class="footer" src="footer-logos.png" alt="Shree Swaminarayan Mandir Vadtaldham Somerset, NJ-USA (VDNJ)"></div>';
+    document.getElementById("board").innerHTML = html;
+  }
+
+  // Pages share one fixed slot. Page 1 is held preloadSeconds longer because
+  // OptiSigns loads the page that much before it appears on screen.
+  function schedule() {
+    clearTimeout(state.timer);
+    var pages = pagesCount(); if (pages <= 1) return;
+    var per = SETTINGS.slotSeconds / pages;
+    var wait = (state.page === 0 ? per + SETTINGS.preloadSeconds : per) * 1000;
+    state.timer = setTimeout(function () { state.page = (state.page + 1) % pages; render(); schedule(); }, wait);
+  }
+
+  function load(first) {
+    if (!SETTINGS.sheetCsvUrl) { render(); document.getElementById("board").insertAdjacentHTML("beforeend", '<div class="msg">No list connected.</div>'); return Promise.resolve(); }
+    var url = SETTINGS.sheetCsvUrl + (SETTINGS.sheetCsvUrl.indexOf("?") < 0 ? "?" : "&") + "t=" + Date.now();
+    return fetch(url, { cache: "no-store" }).then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.text(); })
+      .then(function (t) {
+        var d = fromCsv(t), oldPages = pagesCount();
+        state.rows = d.rows; state.subtitle = d.subtitle;
+        if (state.page >= pagesCount()) state.page = 0;
+        render();
+        if (first || pagesCount() !== oldPages) schedule();
+      })
+      .catch(function (e) { if (first) { render(); document.getElementById("board").insertAdjacentHTML("beforeend", '<div class="msg">Loading list… (' + esc(e.message) + ')</div>'); } });
+  }
+
+  if (window.BOARD_TEST_CSV) { var d = fromCsv(window.BOARD_TEST_CSV); state.rows = d.rows; state.subtitle = d.subtitle; state.page = window.BOARD_TEST_PAGE || 0; render(); return; }
+  load(true);
+  setInterval(function () { load(false); }, SETTINGS.refreshSeconds * 1000);
+})();
+</script>
+</body>
+</html>
